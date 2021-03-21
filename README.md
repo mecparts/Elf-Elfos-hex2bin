@@ -14,9 +14,12 @@ extension of any name, the output file name is the truncated file name.
 In all other cases, an extension of '.bin' is added.
 
 ```
-   $ hex2bin test.hex
+   Ready
+   : hex2bin test.hex
    test created
-   $
+   
+   Ready
+   :
 ```	
 
 The code verifies each line's checksum, and handles gaps in the hex
