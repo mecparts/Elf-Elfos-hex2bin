@@ -1,6 +1,6 @@
 # hex2bin
 
-## A Intel Hex to binary file converter for Elf/OS
+## An Intel Hex to binary file converter for Elf/OS
 
 I was trying to come up with a project for my first foray into file
 handling under Mike Riley's Elf/OS, and came across a couple of "it'd
