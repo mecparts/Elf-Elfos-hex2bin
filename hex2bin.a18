@@ -1,0 +1,454 @@
+; -------------------------------------------------------------------
+; *** hex2bin: converts an Intel hex file to binary
+; ***
+; *** Build #
+; ***  1: Initial version
+; *******************************************************************
+; *** This software is copyleft 2021 by Wayne Hortensius          ***
+; *** All wrongs reserved.                                        ***
+; *******************************************************************
+; *** Assembled with my modified version of the A18 assembler     ***
+; *** originally from https://github.com/carangil/A18:            ***
+; *** New & alternately named pseudo-ops: #else, #endif, #if,     ***
+; ***   .echo, .error, .eject, .page, .title, call, dc, eject,    ***
+; ***   endif, include, mov, pop, popd, push, pushd, retn, title  ***
+; *** Geany compatible error messages                             ***
+; *******************************************************************
+;
+	incl	"bios.inc"
+	incl	"kernel.inc"
+;
+OrgAddr	equ	2000h
+;
+	org	OrgAddr-6
+	dw	OrgAddr
+	dw	endrom-OrgAddr
+	dw	OrgAddr
+
+	org	OrgAddr
+Start:	br	Main
+;
+Date:	db	80h+3		; Month: March
+	db	20		; Day 20
+	dw	2021		; year = 2021
+;
+Build:	dw	1		; build number
+	db	'@Copyleft 2021 Wayne Hortensius',0
+;
+cr	equ	13
+lf	equ	10
+tab	equ	9
+;
+; Register usage
+; R0-R6: Elf/OS
+; R7:    hex file buffer pointer
+; R8:    binary file buffer pointer
+; R9:    variable block pointer
+; RA:    command tail pointer
+; RB:    binary file buffer byte count
+; RC:    hex file buffer character count
+; RD:    
+; RE:    Elf/OS
+; RF:    
+;
+Main:	lda	ra		; ra -> command tail
+	smi	' '		; skip over spaces to find
+	lbz	Main		; filename argument
+	dec	ra
+	ghi	ra		; temp copy of argument address in rf
+	phi	rf
+	glo	ra
+	plo	rf
+FindTerminator:
+	lda	rf		; look for first non printable char
+	smi	' '+1		; (i.e. end of command tail)
+	lbdf	FindTerminator
+	dec	rf
+	ldi	0		; terminate command tail with NUL
+	str	rf
+	ghi	ra		; ra -> start of filename argument
+	phi	rf		; copy ra to rf
+	glo	ra
+	plo	rf
+	ldn	rf		; any argument?
+	lbnz	OpenHex		; yep, try opening it as a file
+	call	f_inmsg		; otherwise display usage message
+	db	'Usage: hex2bin filename',cr,lf,0
+	retn			; return to Elf/OS
+;
+OpenHex:
+	load	rd,HexFildes	; hex file descriptor
+	ldi	0		; (no create, no truncate, no append) flags
+	plo	r7
+	call	O_OPEN		; attempt to open file
+	lbnf	HexOpened	; DF=0, file was opened
+	call	f_inmsg
+	db	'File not found',cr,lf,0
+	lbr	O_WRMBOOT	; return to Elf/OS
+;
+HexOpened:
+	ghi	ra		; ra -> start of filename argument
+	phi	rf		; copy ra to rf
+	glo	ra
+	plo	rf
+	ldi	0
+	plo	rc		; count characters
+CountChars:
+	lda	rf
+	smi	' '+1
+	inc	rc
+	lbdf	CountChars	; loop until the NUL terminator found
+	glo	rc
+	smi	5		; at least 5 characters long?
+	lbnf	AddExtension
+	dec	rf
+	dec	rf
+	dec	rf
+	dec	rf
+	dec	rf		; back up to possible '.' character
+	ldn	rf
+	smi	'.'
+	lbz	FoundExtension
+	inc	rf		; no '.hex' extension found, add '.bin'
+	inc	rf		; to end
+	inc	rf
+	inc	rf
+	inc	rf		; point back to terminator
+AddExtension:
+	dec	rf		; if the user didn't specify
+	ldi	'.'		; 'filename.hex' on the command line,
+	str	rf		; we'll add a '.bin' to whatever they
+	inc	rf		; did specify
+	ldi	'b'
+	str	rf
+	inc	rf
+	ldi	'i'
+	str	rf
+	inc	rf
+	ldi	'n'
+	str	rf
+	inc	rf
+	ldi	0
+	str	rf
+	lbr	CreateBinFile
+FoundExtension:
+	ldi	0
+	str	rf		; cut off '.hex' extension for output
+CreateBinFile:
+	ghi	ra
+	phi	rf
+	glo	ra
+	plo	rf
+	load	rd,BinFildes	; get file descriptor
+	ldi	3		; flags for open (create + truncate)
+	plo	r7
+	call	O_OPEN		; attempt to open file
+	lbnf	BinCreated	; jump if file was opened
+	call	f_inmsg		; display it
+	db	'Failed to create ',0
+	ghi	ra		; ra -> start of filename argument
+	phi	rf		; copy ra to rf
+	glo	ra
+	plo	rf
+	call	O_MSG
+	call	f_inmsg
+	db	cr,lf,0
+	lbr	CloseHexAndExit
+BinCreated:
+	load	rc,0		; no chars in input hex buffer
+	load	rb,0		; no bytes in output bin buffer
+	load	r8,BinaryBuff
+	load	r9,nextAddr
+	ldi	0FFH		; start with next expected address
+	str	r9		; of FFFF to indicate that no padding
+	inc	r9		; bytes will be required
+	str	r9
+LineLoop:
+	load	r9,checksum	; point to checksum
+	ldi	0
+	str	r9		; start checksum at zero
+	call	GetChar
+	lbdf	WritePartialAndExit	; EOF
+	smi	':'		; Intel hex file lines start with ':'
+	lbnz	LineLoop
+	load	r9,numBytes
+	call	GetHexByte	; data bytes to follow
+	inc	r9		; point to numBytes
+	str	r9		; store it
+	call	GetHexByte	; high byte of address
+	inc	r9
+	inc	r9		; point to high byte of address
+	str	r9		; store it
+	call	GetHexByte	; low byte of address
+	inc	r9
+	inc	r9
+	inc	r9		; point to low byte of address
+	str	r9		; store it
+	call	GetHexByte	; record type: doesn't get checksum'd
+	lbz	DataLine	; as we only really care about type 0
+	smi	1		; (type 1 EOF doesn't get checksum'd)
+	lbz	WritePartialAndExit
+	call	f_inmsg
+	db	'Only type 0 and 1 type records supported',cr,lf,0
+	lbr	DeleteBinAndExit
+DataLine:
+	load	r9,nextAddr
+	ldn	r9
+	smi	0FFH
+	lbnz	NotFirstAddr	; jump if not first addr and check for 
+	inc	r9		; any required padding
+	ldn	r9
+	smi	0FFH
+	lbnz	NotFirstAddr		
+	load	rd,address+1	; 'nextAddr' was FFFF, no padding req'd
+	ldn	rd		; just set 'nextAddr' to first 'address'
+	str	r9
+	dec	r9
+	dec	rd
+	ldn	rd
+	str	r9
+	lbr	AdvanceNextAddr
+NotFirstAddr:
+	load	r9,nextAddr+1	; Check to see if the expected next
+	load	rd,address+1	; address matches the address of the hex
+	ldn	rd		; line.
+	sex	r9		; If it does, continue on.
+	sm			; If the address of the hex line is less
+	plo	rf		; than the next expected address, you've
+	dec	r9		; got overlapping addresses in the hex
+	dec	rd		; file, and that's an error.
+	ldn	rd		; If the address of the hex line is more
+	smb			; than the next expected address,
+	phi	rf		; there's a gap in the hex file data,
+	sex	r2		; and we'll fill it with FFs.
+	lbnz	AddrIsDifferent
+	glo	rf
+	lbz	AdvanceNextAddr
+AddrIsDifferent:
+	lbdf	Padding		; DF=1, no borrow, need padding bytes
+	call	f_inmsg
+	db	'Overlapping load addresses',cr,lf,0
+	lbr	DeleteBinAndExit
+Padding:
+	ldi	0FFH		; add padding bytes to fill the gap
+	call	PutByte
+	dec	rf
+	glo	rf
+	lbnz	Padding
+	ghi	rf
+	lbnz	Padding
+;
+AdvanceNextAddr:
+	load	r9,numBytes	; nextAddr = address + numBytes
+	load	rd,address+1
+	load	rf,nextAddr+1
+	ldn	rd
+	sex	r9
+	add
+	sex	r2
+	str	rf
+	dec	rd
+	dec	rf
+	ldn	rd
+	adci	0
+	str	rf
+	ldn	r9		; numBytes is the loop counter
+	plo	rd
+DataLoop:
+	call	GetHexByte
+	call	PutByte
+	dec	rd
+	glo	rd
+	lbnz	DataLoop
+	call	GetHexByte	; get the line's checksum byte itself
+	ldn	r9		; get checksum
+	lbnz	ChecksumError	; checksum ought to work out to zero
+	lbr	LineLoop
+;	
+WritePartialAndExit:
+	glo	rb
+	plo	rc
+	lbnz	WritePartial
+	ghi	rb
+	phi	rc
+	lbz	CloseFiles
+WritePartial:
+	load	rf,BinaryBuff	; write out any partial end sector
+	load	rd,BinFildes
+	call	O_WRITE
+	lbdf	WriteError
+CloseFiles:
+	load	rf,BinFildes
+	call	O_CLOSE		; close the bin file
+	glo	ra
+	plo	rf
+	ghi	ra
+	phi	rf
+	call	O_MSG
+	call	f_inmsg
+	db	' created',cr,lf,0
+CloseHexAndExit:
+	load	rf,HexFildes
+	call	O_CLOSE		; close the hex file
+	lbr	O_WRMBOOT	; return to Elf/OS
+DeleteBinAndExit:
+	load	rf,BinFildes
+	call	O_CLOSE		; try to close the bin file
+	glo	ra		; rf -> binary output filename
+	plo	rf
+	ghi	ra
+	phi	rf
+	call	O_DELETE	; delete the bin file
+	lbnf	CloseHexAndExit
+	call	f_inmsg
+	db	'Error deleting ',0
+	glo	ra
+	plo	rf
+	ghi	ra
+	phi	rf
+	call	O_MSG
+	call	f_inmsg
+	db	cr,lf,0
+	lbr	CloseHexAndExit
+;
+ChecksumError:
+	call	f_inmsg
+	db	'Checksum error',cr,lf,0
+	lbr	DeleteBinAndExit
+;
+ReadError:
+	call	f_inmsg
+	db	'Error reading HEX file',cr,lf,0
+	lbr	DeleteBinAndExit
+;
+WriteError:
+	call	f_inmsg
+	db	'Error writing binary file',cr,lf,0
+	lbr	DeleteBinAndExit
+;	
+GetChar:
+	glo	rc		; any characters left in HexBuff?
+	lbnz	NextChar	; yes, go grab it
+	load	rc,HexBuffSize
+	push	rd
+	push	rf
+	load	rf,HexBuff
+	load	rd,HexFildes
+	call	O_READ		; read another chunk from the hex file
+	pop	rf
+	pop	rd
+	lbdf	ReadError	; DF=1, read error
+	load	r7,HexBuff
+	ghi	rc		; any characters read?
+	lbnz	NextChar
+	glo	rc
+	lbnz	NextChar
+	smi	0		; DF=1, signal EOF
+	retn
+NextChar:
+	dec	rc		; decrement available characters left
+	lda	r7		; grab character, advance point
+	smi	cr		; ignore CRs
+	lbz	GetChar
+	adi	cr
+	adi	0		; DF=0, valid char
+	retn
+;
+PutByte:
+	inc	rb		; ++bytesWritten
+	str	r8		; store output byte
+	inc	r8
+	ghi	rb		; check for full output buffer?
+	smi	high 512
+	lbz	WriteBuff	; buffer's full, write it out
+	retn
+WriteBuff:
+	push	rc		; save used registers
+	push	rd
+	push	rf
+	load	rc,512
+	load	rf,BinaryBuff
+	load	rd,BinFildes
+	call	O_WRITE		; write buffer
+	pop	rf
+	pop	rd
+	pop	rc
+	lbdf	WriteError	; DF=1, write error
+	load	rb,0		; empty output buffer
+	load	r8,BinaryBuff
+	retn
+;
+GetHexDigit:
+	call	GetChar
+	smi	'0'
+	lbnf	BadHexDigit	; < '0', bad
+	smi	10
+	lbdf	TryAF
+	adi	10		; it was 0-9
+	retn
+TryAF:	adi	'0'+10
+	smi	'A'
+	lbnf	BadHexDigit	; < 'A', bad
+	smi	6
+	lbdf	BadHexDigit	; > 'F', bad
+	adi	0AH+6		; it was A-F
+	retn
+BadHexDigit:
+	call	f_inmsg
+	db	'Bad hexadecimal digit',cr,lf,0
+	lbr	DeleteBinAndExit
+;
+GetHexByte:
+	load	r9,checksum
+	call	GetHexDigit	; get high nibble
+	shl
+	shl
+	shl
+	shl
+	stxd			; save high nibble
+	call	GetHexDigit	; get low nibble
+	irx
+	or			; or in low nibble
+	str	r2		; save hex byte
+	sex	r9
+	add			; update the checksum
+	str	r9
+	sex	r2
+	ldn	r2		; restore hex byte
+	retn
+;
+HexFildes:
+	db	0,0,0,0
+	dw	HexDTA
+	db	0,0
+	db	0
+	db	0,0,0,0
+	dw	0,0
+	db	0,0,0,0
+BinFildes:
+	db	0,0,0,0
+	dw	BinDTA
+	db	0,0
+	db	0
+	db	0,0,0,0
+	dw	0,0
+	db	0,0,0,0
+;
+endrom	equ	$
+;
+;-----------------------------------
+VarBlock:			; /
+checksum: ds	1		; | these four variables must remain
+numBytes: ds	1		; |
+address: ds	2		; | together and in this order
+nextAddr: ds	2		; \
+;-----------------------------------
+;
+HexBuffSize	equ	256
+HexBuff:	ds	HexBuffSize
+BinaryBuff:	ds	512
+;
+HexDTA:	ds	512
+BinDTA:	ds	512
+
+	end
