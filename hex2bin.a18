@@ -3,6 +3,9 @@
 ; ***
 ; *** Build #
 ; ***  1: Initial version
+; ***  2: Use local stack
+; ***  3: Restore Elf/OS's return address (r6) when returning
+; ***     to Elf/OS from a routine below main program level
 ; *******************************************************************
 ; *** This software is copyleft 2021 by Wayne Hortensius          ***
 ; *** All wrongs reserved.                                        ***
@@ -29,10 +32,10 @@ OrgAddr	equ	2000h
 Start:	br	Main
 ;
 Date:	db	80h+7		; Month: July
-	db	21		; Day 21
+	db	25		; Day 25
 	dw	2021		; year = 2021
 ;
-Build:	dw	2		; build number
+Build:	dw	3		; build number
 	db	'@Copyleft 2021 Wayne Hortensius',0
 ;
 cr	equ	13
@@ -52,6 +55,7 @@ tab	equ	9
 ; RF:    
 ;
 Main:	
+	push	r6		; save Elf/OS's return address on its stack
 	load	rf,saveStack	; save Elf/OS's stack
 	ghi	r2
 	str	rf
@@ -81,7 +85,7 @@ FindTerminator:
 	plo	rf
 	ldn	rf		; any argument?
 	lbnz	OpenHex		; yep, try opening it as a file
-	call	f_inmsg		; otherwise display usage message
+	call	O_INMSG		; otherwise display usage message
 	db	'Usage: hex2bin filename',cr,lf,0
 Exit:
 	load	rf,saveStack	; restore Elf/OS's stack
@@ -89,6 +93,7 @@ Exit:
 	phi	r2
 	ldn	rf
 	plo	r2
+	pop	r6		; restore Elf/OS's return address
 	retn			; return to Elf/OS
 ;
 OpenHex:
@@ -97,7 +102,7 @@ OpenHex:
 	plo	r7
 	call	O_OPEN		; attempt to open file
 	lbnf	HexOpened	; DF=0, file was opened
-	call	f_inmsg
+	call	O_INMSG
 	db	'File not found',cr,lf,0
 	lbr	Exit		; return to Elf/OS
 ;
@@ -159,14 +164,14 @@ CreateBinFile:
 	plo	r7
 	call	O_OPEN		; attempt to open file
 	lbnf	BinCreated	; jump if file was opened
-	call	f_inmsg		; display it
+	call	O_INMSG		; display it
 	db	'Failed to create ',0
 	ghi	ra		; ra -> start of filename argument
 	phi	rf		; copy ra to rf
 	glo	ra
 	plo	rf
 	call	O_MSG
-	call	f_inmsg
+	call	O_INMSG
 	db	cr,lf,0
 	lbr	CloseHexAndExit
 BinCreated:
@@ -203,7 +208,7 @@ LineLoop:
 	lbz	DataLine	; as we only really care about type 0
 	smi	1		; (type 1 EOF doesn't get checksum'd)
 	lbz	WritePartialAndExit
-	call	f_inmsg
+	call	O_INMSG
 	db	'Only type 0 and 1 type records supported',cr,lf,0
 	lbr	DeleteBinAndExit
 DataLine:
@@ -241,7 +246,7 @@ NotFirstAddr:
 	lbz	AdvanceNextAddr
 AddrIsDifferent:
 	lbdf	Padding		; DF=1, no borrow, need padding bytes
-	call	f_inmsg
+	call	O_INMSG
 	db	'Overlapping load addresses',cr,lf,0
 	lbr	DeleteBinAndExit
 Padding:
@@ -300,7 +305,7 @@ CloseFiles:
 	ghi	ra
 	phi	rf
 	call	O_MSG
-	call	f_inmsg
+	call	O_INMSG
 	db	' created',cr,lf,0
 CloseHexAndExit:
 	load	rf,HexFildes
@@ -315,29 +320,29 @@ DeleteBinAndExit:
 	phi	rf
 	call	O_DELETE	; delete the bin file
 	lbnf	CloseHexAndExit
-	call	f_inmsg
+	call	O_INMSG
 	db	'Error deleting ',0
 	glo	ra
 	plo	rf
 	ghi	ra
 	phi	rf
 	call	O_MSG
-	call	f_inmsg
+	call	O_INMSG
 	db	cr,lf,0
 	lbr	CloseHexAndExit
 ;
 ChecksumError:
-	call	f_inmsg
+	call	O_INMSG
 	db	'Checksum error',cr,lf,0
 	lbr	DeleteBinAndExit
 ;
 ReadError:
-	call	f_inmsg
+	call	O_INMSG
 	db	'Error reading HEX file',cr,lf,0
 	lbr	DeleteBinAndExit
 ;
 WriteError:
-	call	f_inmsg
+	call	O_INMSG
 	db	'Error writing binary file',cr,lf,0
 	lbr	DeleteBinAndExit
 ;	
@@ -409,7 +414,7 @@ TryAF:	adi	'0'+10
 	adi	0AH+6		; it was A-F
 	retn
 BadHexDigit:
-	call	f_inmsg
+	call	O_INMSG
 	db	'Bad hexadecimal digit',cr,lf,0
 	lbr	DeleteBinAndExit
 ;
@@ -463,6 +468,8 @@ nextAddr: ds	2		; \
 localStack:
 	ds	1
 saveStack:
+	ds	2
+saveR6:
 	ds	2
 ;
 HexBuffSize	equ	256
